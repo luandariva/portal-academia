@@ -1,0 +1,11 @@
+{
+  "name": "alimentaai-pwa-root",
+  "private": true,
+  "description": "Raiz do repositório: o app Vite fica em ./alimentaai-pwa",
+  "scripts": {
+    "postinstall": "npm install --prefix ./alimentaai-pwa",
+    "dev": "npm run dev --prefix ./alimentaai-pwa",
+    "build": "npm run build --prefix ./alimentaai-pwa",
+    "preview": "npm run preview --prefix ./alimentaai-pwa"
+  }
+}
