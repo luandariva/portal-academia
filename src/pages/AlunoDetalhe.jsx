@@ -11,6 +11,40 @@ const CATEGORIAS = [
 const HIDDEN_KEYS = new Set(['id', 'usuario_id', 'user_id', 'auth_user_id'])
 const DATE_KEY_CANDIDATES = ['data_hora', 'data_ref', 'data', 'created_at', 'updated_at']
 
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value))
+}
+
+function getRiskLevel(score) {
+  if (score >= 70) return { label: 'Alto', color: 'var(--red)', bg: 'rgba(248,113,113,.11)', border: 'rgba(248,113,113,.35)' }
+  if (score >= 40) return { label: 'Médio', color: 'rgb(251,191,36)', bg: 'rgba(251,191,36,.1)', border: 'rgba(251,191,36,.3)' }
+  return { label: 'Baixo', color: 'var(--lime)', bg: 'rgba(201,242,77,.11)', border: 'rgba(201,242,77,.3)' }
+}
+
+function calcRisk({ lastActivityAt, activities7d, refeicoes7d }) {
+  if (!lastActivityAt) return 95
+  const now = Date.now()
+  const lastTs = new Date(lastActivityAt).getTime()
+  const daysWithout = Math.floor((now - lastTs) / (1000 * 60 * 60 * 24))
+
+  let score = 0
+  if (daysWithout <= 3) score = 15
+  else if (daysWithout <= 7) score = 35
+  else if (daysWithout <= 14) score = 55
+  else if (daysWithout <= 21) score = 75
+  else score = 90
+
+  if (activities7d >= 6) score -= 25
+  else if (activities7d >= 3) score -= 10
+  else if (activities7d <= 1) score += 10
+
+  if (refeicoes7d >= 14) score -= 10
+  else if (refeicoes7d >= 7) score -= 5
+  else if (refeicoes7d === 0) score += 5
+
+  return clamp(score, 0, 99)
+}
+
 function looksLikeDateKey(key) {
   const lower = String(key || '').toLowerCase()
   return lower.includes('data') || lower.includes('date') || lower.includes('hora') || lower.endsWith('_at')
@@ -185,6 +219,7 @@ export default function AlunoDetalhe() {
   })
   const [saving, setSaving] = useState(false)
   const [saveMsg, setSaveMsg] = useState('')
+  const [riscoData, setRiscoData] = useState(null)
 
   useEffect(() => {
     async function load() {
@@ -275,6 +310,50 @@ export default function AlunoDetalhe() {
           setRankingAluno({ posicao: null, pontos: 0, total: rankingRows.length })
         }
       }
+
+      // Risco de Cancelamento
+      const [{ data: tRisk }, { data: dRisk }, { data: rRisk }] = await Promise.all([
+        supabase.from('treinos_realizados').select('data_hora, created_at').eq('usuario_id', id),
+        supabase.from('desafios_semanais_conclusoes').select('concluido_em, created_at').eq('usuario_id', id),
+        supabase.from('refeicoes').select('data_hora, created_at, data_ref, data').eq('usuario_id', id)
+      ])
+
+      let riskActivities7d = 0
+      let riskRefeicoes7d = 0
+      let riskLastActivityAt = null
+      const riskNowMs = Date.now()
+      const riskSevenDaysAgo = riskNowMs - (7 * 24 * 60 * 60 * 1000)
+
+      function absorbRisk(events, onCount) {
+        ;(events || []).forEach(row => {
+          const dateKey = findDateKeyFromRow(row) || Object.keys(row)[0]
+          const when = toDate(row?.[dateKey])
+          if (!when) return
+          const ts = when.getTime()
+          if (ts >= riskSevenDaysAgo) riskActivities7d += 1
+          if (onCount) onCount(ts)
+          if (!riskLastActivityAt || ts > new Date(riskLastActivityAt).getTime()) {
+            riskLastActivityAt = when.toISOString()
+          }
+        })
+      }
+
+      absorbRisk(tRisk)
+      absorbRisk(dRisk)
+      absorbRisk(rRisk, ts => {
+        if (ts >= riskSevenDaysAgo) riskRefeicoes7d += 1
+      })
+
+      const riskScore = calcRisk({ lastActivityAt: riskLastActivityAt, activities7d: riskActivities7d, refeicoes7d: riskRefeicoes7d })
+      
+      setRiscoData({
+        score: riskScore,
+        level: getRiskLevel(riskScore),
+        activities7d: riskActivities7d,
+        refeicoes7d: riskRefeicoes7d,
+        lastActivityAt: riskLastActivityAt,
+        daysWithout: riskLastActivityAt ? Math.floor((riskNowMs - new Date(riskLastActivityAt).getTime()) / (1000 * 60 * 60 * 24)) : null
+      })
 
       setLoading(false)
     }
@@ -422,6 +501,7 @@ export default function AlunoDetalhe() {
             { id: 'nutricao', label: 'Nutrição' },
             { id: 'gamif', label: 'Gamificação' },
             { id: 'perfil', label: 'Dados pessoais' },
+            { id: 'risco', label: 'Risco de Cancelamento' },
           ].map(t => (
             <Tab key={t.id} active={tab === t.id} onClick={() => setTab(t.id)}>{t.label}</Tab>
           ))}
@@ -849,6 +929,71 @@ export default function AlunoDetalhe() {
                   </div>
                 ))}
               </div>
+            </Secao>
+          </div>
+        )}
+
+        {/* Tab: Risco de Cancelamento */}
+        {tab === 'risco' && (
+          <div className="anim">
+            <Secao title="Análise de Risco de Cancelamento">
+              {riscoData ? (
+                <div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 24, flexWrap: 'wrap' }}>
+                    <div style={{
+                      background: riscoData.level.bg,
+                      border: `1px solid ${riscoData.level.border}`,
+                      borderRadius: 16,
+                      padding: '16px 24px',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      alignItems: 'center',
+                      minWidth: 140
+                    }}>
+                      <span style={{ fontSize: 13, textTransform: 'uppercase', letterSpacing: '.05em', color: 'var(--text-3)', fontWeight: 600 }}>Score</span>
+                      <span style={{ fontSize: 36, fontWeight: 800, color: riscoData.level.color }}>{riscoData.score}%</span>
+                      <span style={{ fontSize: 14, fontWeight: 700, color: riscoData.level.color, marginTop: 4 }}>{riscoData.level.label}</span>
+                    </div>
+                    
+                    <div style={{ flex: 1, display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 12 }}>
+                      <div style={{ background: 'var(--bg-3)', border: '1px solid var(--border)', borderRadius: 10, padding: 14 }}>
+                        <p style={{ fontSize: 11, color: 'var(--text-3)', textTransform: 'uppercase', letterSpacing: '.07em', fontWeight: 600 }}>Dias Inativo</p>
+                        <p style={{ marginTop: 6, fontSize: 22, fontWeight: 800 }}>{riscoData.daysWithout === null ? '—' : riscoData.daysWithout}</p>
+                      </div>
+                      <div style={{ background: 'var(--bg-3)', border: '1px solid var(--border)', borderRadius: 10, padding: 14 }}>
+                        <p style={{ fontSize: 11, color: 'var(--text-3)', textTransform: 'uppercase', letterSpacing: '.07em', fontWeight: 600 }}>Ativ. (7 dias)</p>
+                        <p style={{ marginTop: 6, fontSize: 22, fontWeight: 800 }}>{riscoData.activities7d}</p>
+                      </div>
+                      <div style={{ background: 'var(--bg-3)', border: '1px solid var(--border)', borderRadius: 10, padding: 14 }}>
+                        <p style={{ fontSize: 11, color: 'var(--text-3)', textTransform: 'uppercase', letterSpacing: '.07em', fontWeight: 600 }}>Ref. (7 dias)</p>
+                        <p style={{ marginTop: 6, fontSize: 22, fontWeight: 800 }}>{riscoData.refeicoes7d}</p>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div style={{
+                    background: 'var(--bg-2)',
+                    border: '1px solid var(--border)',
+                    borderRadius: 10,
+                    padding: '12px 14px',
+                  }}>
+                    <p style={{ fontSize: 12, fontWeight: 700, marginBottom: 6 }}>Critérios do risco de cancelamento</p>
+                    <p style={{ fontSize: 12, color: 'var(--text-3)', lineHeight: 1.6 }}>
+                      O score vai de 0 a 99 e combina <strong>tempo sem atividade</strong> + <strong>atividades nos últimos 7 dias</strong>.
+                      Faixas: <strong>Alto</strong> (70-99), <strong>Médio</strong> (40-69) e <strong>Baixo</strong> (0-39).
+                    </p>
+                    <p style={{ fontSize: 12, color: 'var(--text-3)', lineHeight: 1.6, marginTop: 6 }}>
+                      Base por inatividade: sem atividade = 95, até 3 dias = 15, até 7 dias = 35, até 14 dias = 55, até 21 dias = 75, acima de 21 dias = 90.
+                      Ajuste por frequência: 6+ atividades (-25), 3-5 (-10), 0-1 (+10).
+                    </p>
+                    <p style={{ fontSize: 12, color: 'var(--text-3)', lineHeight: 1.6, marginTop: 6 }}>
+                      Peso de refeições (7 dias): 14+ refeições (-10), 7-13 (-5), nenhuma refeição (+5).
+                    </p>
+                  </div>
+                </div>
+              ) : (
+                <p style={{ fontSize: 13, color: 'var(--text-3)' }}>Carregando dados de risco...</p>
+              )}
             </Secao>
           </div>
         )}
